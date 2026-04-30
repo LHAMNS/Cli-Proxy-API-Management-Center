@@ -5,6 +5,8 @@ import { bootstrap } from './state/bootstrap';
 import { registerConnectCommand } from './commands/connect';
 import { registerVersionCommand } from './commands/version';
 import { registerLoginCommand } from './commands/login';
+import { registerAuthCommand } from './commands/auth';
+import { registerUsageCommand } from './commands/usage';
 
 const program = new Command();
 
@@ -30,6 +32,8 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
 registerConnectCommand(program);
 registerVersionCommand(program);
 registerLoginCommand(program);
+registerAuthCommand(program);
+registerUsageCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const error = err as Error & { code?: string };
