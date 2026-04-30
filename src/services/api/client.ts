@@ -16,6 +16,8 @@ class ApiClient {
   private instance: AxiosInstance;
   private apiBase: string = '';
   private managementKey: string = '';
+  private lastServerVersion: string | null = null;
+  private lastServerBuildDate: string | null = null;
 
   constructor() {
     this.instance = axios.create({
@@ -105,26 +107,28 @@ class ApiClient {
       (error) => Promise.reject(this.handleError(error))
     );
 
-    // 响应拦截器
+    // 响应拦截器：在 CLI 模式下记录最近一次的 server version/buildDate（不再派发浏览器事件）
     this.instance.interceptors.response.use(
       (response) => {
         const headers = response.headers as Record<string, string | undefined>;
         const version = this.readHeader(headers, VERSION_HEADER_KEYS);
         const buildDate = this.readHeader(headers, BUILD_DATE_HEADER_KEYS);
 
-        // 触发版本更新事件（后续通过 store 处理）
-        if (version || buildDate) {
-          window.dispatchEvent(
-            new CustomEvent('server-version-update', {
-              detail: { version: version || null, buildDate: buildDate || null }
-            })
-          );
-        }
+        if (version) this.lastServerVersion = version;
+        if (buildDate) this.lastServerBuildDate = buildDate;
 
         return response;
       },
       (error) => Promise.reject(this.handleError(error))
     );
+  }
+
+  getLastServerVersion(): string | null {
+    return this.lastServerVersion;
+  }
+
+  getLastServerBuildDate(): string | null {
+    return this.lastServerBuildDate;
   }
 
   /**
@@ -153,9 +157,9 @@ class ApiClient {
       apiError.details = responseData;
       apiError.data = responseData;
 
-      // 401 未授权 - 触发登出事件
+      // 401 未授权 - CLI 层会捕获 code 'UNAUTHORIZED' 并提示重新连接
       if (error.response?.status === 401) {
-        window.dispatchEvent(new Event('unauthorized'));
+        apiError.code = 'UNAUTHORIZED';
       }
 
       return apiError;

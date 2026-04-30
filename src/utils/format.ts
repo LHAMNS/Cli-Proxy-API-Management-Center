@@ -6,11 +6,11 @@ import { parseTimestamp } from './timestamp';
  */
 
 const resolveDefaultLocale = (): string | undefined => {
-  const fromDocument =
-    typeof document !== 'undefined' ? document.documentElement?.lang?.trim() : '';
-  if (fromDocument) return fromDocument;
-  const fromNavigator = typeof navigator !== 'undefined' ? navigator.language?.trim() : '';
-  return fromNavigator || undefined;
+  if (typeof navigator !== 'undefined' && navigator.language) {
+    const lang = navigator.language.trim();
+    if (lang) return lang;
+  }
+  return undefined;
 };
 
 /**

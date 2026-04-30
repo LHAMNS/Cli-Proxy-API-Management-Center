@@ -3,26 +3,25 @@
  * 迁移自基线 modules/usage.js 的纯逻辑部分
  */
 
-import type { ScriptableContext } from 'chart.js';
-import type { LatencyAccumulator, LatencyStats } from './usage/latency';
+import type { LatencyAccumulator, LatencyStats } from './latency';
 import {
   addLatencySample,
   calculateLatencyStatsFromDetails,
   createLatencyAccumulator,
   extractLatencyMs,
   finalizeLatencyStats,
-} from './usage/latency';
+} from './latency';
 import { maskApiKey } from './format';
 import { parseTimestampMs } from './timestamp';
 
-export type { DurationFormatOptions, LatencyStats } from './usage/latency';
+export type { DurationFormatOptions, LatencyStats } from './latency';
 export {
   LATENCY_SOURCE_FIELD,
   LATENCY_SOURCE_UNIT,
   calculateLatencyStatsFromDetails,
   extractLatencyMs,
   formatDurationMs,
-} from './usage/latency';
+} from './latency';
 
 export interface KeyStatBucket {
   success: number;
@@ -1256,139 +1255,6 @@ export function buildDailySeriesByModel(
   });
 
   return { labels, dataByModel, hasData };
-}
-
-export interface ChartDataset {
-  label: string;
-  data: number[];
-  borderColor: string;
-  backgroundColor:
-    | string
-    | CanvasGradient
-    | ((context: ScriptableContext<'line'>) => string | CanvasGradient);
-  pointBackgroundColor?: string;
-  pointBorderColor?: string;
-  fill: boolean;
-  tension: number;
-}
-
-export interface ChartData {
-  labels: string[];
-  datasets: ChartDataset[];
-}
-
-const CHART_COLORS = [
-  { borderColor: '#8b8680', backgroundColor: 'rgba(139, 134, 128, 0.15)' },
-  { borderColor: '#22c55e', backgroundColor: 'rgba(34, 197, 94, 0.15)' },
-  { borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.15)' },
-  { borderColor: '#c65746', backgroundColor: 'rgba(198, 87, 70, 0.15)' },
-  { borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.15)' },
-  { borderColor: '#06b6d4', backgroundColor: 'rgba(6, 182, 212, 0.15)' },
-  { borderColor: '#ec4899', backgroundColor: 'rgba(236, 72, 153, 0.15)' },
-  { borderColor: '#84cc16', backgroundColor: 'rgba(132, 204, 22, 0.15)' },
-  { borderColor: '#f97316', backgroundColor: 'rgba(249, 115, 22, 0.15)' },
-];
-
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-
-const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
-  const normalized = hex.trim().replace('#', '');
-  if (normalized.length !== 6) {
-    return null;
-  }
-  const r = Number.parseInt(normalized.slice(0, 2), 16);
-  const g = Number.parseInt(normalized.slice(2, 4), 16);
-  const b = Number.parseInt(normalized.slice(4, 6), 16);
-  if (![r, g, b].every((channel) => Number.isFinite(channel))) {
-    return null;
-  }
-  return { r, g, b };
-};
-
-const withAlpha = (hex: string, alpha: number) => {
-  const rgb = hexToRgb(hex);
-  if (!rgb) {
-    return hex;
-  }
-  const clamped = clamp(alpha, 0, 1);
-  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${clamped})`;
-};
-
-const buildAreaGradient = (
-  context: ScriptableContext<'line'>,
-  baseHex: string,
-  fallback: string
-) => {
-  const chart = context.chart;
-  const ctx = chart.ctx;
-  const area = chart.chartArea;
-
-  if (!area) {
-    return fallback;
-  }
-
-  const gradient = ctx.createLinearGradient(0, area.top, 0, area.bottom);
-  gradient.addColorStop(0, withAlpha(baseHex, 0.28));
-  gradient.addColorStop(0.6, withAlpha(baseHex, 0.12));
-  gradient.addColorStop(1, withAlpha(baseHex, 0.02));
-  return gradient;
-};
-
-/**
- * 构建图表数据
- */
-export function buildChartData(
-  usageData: unknown,
-  period: 'hour' | 'day' = 'day',
-  metric: 'requests' | 'tokens' = 'requests',
-  selectedModels: string[] = [],
-  options: { hourWindowHours?: number } = {}
-): ChartData {
-  const baseSeries =
-    period === 'hour'
-      ? buildHourlySeriesByModel(usageData, metric, options.hourWindowHours)
-      : buildDailySeriesByModel(usageData, metric);
-
-  const { labels, dataByModel } = baseSeries;
-
-  // Build "All" series as sum of all models
-  const getAllSeries = (): number[] => {
-    const summed = new Array(labels.length).fill(0);
-    dataByModel.forEach((values) => {
-      values.forEach((value, idx) => {
-        summed[idx] = (summed[idx] || 0) + value;
-      });
-    });
-    return summed;
-  };
-
-  // Determine which models to show
-  const modelsToShow = selectedModels.length > 0 ? selectedModels : ['all'];
-
-  const datasets: ChartDataset[] = modelsToShow.map((model, index) => {
-    const isAll = model === 'all';
-    const data = isAll
-      ? getAllSeries()
-      : dataByModel.get(model) || new Array(labels.length).fill(0);
-    const colorIndex = index % CHART_COLORS.length;
-    const style = CHART_COLORS[colorIndex];
-    const shouldFill = modelsToShow.length === 1 || (isAll && modelsToShow.length > 1);
-
-    return {
-      label: isAll ? 'All Models' : model,
-      data,
-      borderColor: style.borderColor,
-      backgroundColor: shouldFill
-        ? (ctx) => buildAreaGradient(ctx, style.borderColor, style.backgroundColor)
-        : style.backgroundColor,
-      pointBackgroundColor: style.borderColor,
-      pointBorderColor: style.borderColor,
-      fill: shouldFill,
-      tension: 0.35,
-    };
-  });
-
-  return { labels, datasets };
 }
 
 /**
