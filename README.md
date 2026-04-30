@@ -1,159 +1,135 @@
-# CLI Proxy API Management Center
+# cpa — CLI for CLIProxyAPI
 
-A single-file Web UI (React + TypeScript) for operating and troubleshooting the **CLI Proxy API** via its **Management API** (config, credentials, logs, and usage).
+A small **command-line** tool to drive a locally-running [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) backend through its `/v0/management/*` REST surface. Forked from the upstream React WebUI and stripped down to a Node/Bun CLI for **personal local use** — no GUI, no remote management, no security hardening (treat the saved management key as you would any local credential).
 
-[中文文档](README_CN.md)
+## What this is (and isn't)
 
-**Main Project**: https://github.com/router-for-me/CLIProxyAPI  
-**Example URL**: https://remote.router-for.me/  
-**Minimum Required Version**: ≥ 6.8.0 (recommended ≥ 6.8.15)
+- A thin client for the **management API only**. It does not proxy LLM traffic itself.
+- 4 OAuth providers: `codex`, `anthropic`, `antigravity`, `gemini-cli`.
+- Token usage stats + per-request log inspection are preserved.
+- Browser launching is **WSL-aware** (`cmd.exe /c start`, `wslview` fallback).
+- The on-disk config (`~/.config/cpa/config.json`) holds the management key as plaintext. Local-only assumption.
 
-Since version 6.0.19, the Web UI ships with the main program; access it via `/management.html` on the API port once the service is running.
+## Install
 
-## What this is (and isn’t)
+Requires [Bun](https://bun.sh) ≥ 1.1 to build the single binary (or to run from source).
 
-- This repository is the Web UI only. It talks to the CLI Proxy API **Management API** (`/v0/management`) to read/update config, upload credentials, view logs, and inspect usage.
-- It is **not** a proxy and does not forward traffic.
+```bash
+bun install
+bun run build:bin               # → dist/cpa  (~50MB self-contained)
+mv dist/cpa ~/.local/bin/cpa    # or anywhere on $PATH
+cpa --help
+```
+
+For development without the build step:
+
+```bash
+bun run dev -- <subcommand>     # equivalent to `cpa <subcommand>`
+```
 
 ## Quick start
 
-### Option A: Use the Web UI bundled in CLI Proxy API (recommended)
-
-1. Start your CLI Proxy API service.
-2. Open: `http://<host>:<api_port>/management.html`
-3. Enter your **management key** and connect.
-
-The address is auto-detected from the current page URL; manual override is supported.
-
-### Option B: Run the dev server
-
 ```bash
-npm install
-npm run dev
+# 1. Tell the CLI where the proxy lives.
+cpa connect --url http://localhost:8317 --key <management-key>
+
+# 2. Log in to a provider — opens a browser tab.
+cpa login codex
+cpa login gemini-cli --project-id ALL
+
+# 3. Inspect the credentials that landed.
+cpa auth ls
+
+# 4. Watch usage + recent requests.
+cpa usage --last 24h
+cpa logs --follow
+cpa logs trace <request-id>     # full per-request blob
 ```
 
-Open `http://localhost:5173`, then connect to your CLI Proxy API backend instance.
+## Command reference
 
-### Option C: Build a single HTML file
+| Command | What it does |
+|---|---|
+| `cpa connect [-u URL] [-k KEY]` | Save server URL and management key locally. `--show` prints current. `--clear` wipes them. |
+| `cpa version` | Print CLI + server version. |
+| `cpa login <provider> [--project-id ID] [--manual]` | OAuth login. Opens browser, polls every 3 s, falls back to a paste prompt on timeout. |
+| `cpa auth ls [--all]` | List auth files (default hides disabled). |
+| `cpa auth rm <name…> \| --all` | Delete one or more auth files. |
+| `cpa auth toggle <name> [--enable\|--disable]` | Flip the disabled state. |
+| `cpa auth cat <name> [--raw]` | Print credential JSON (or raw text). |
+| `cpa auth save <name> <dest>` | Save the credential to a local file. |
+| `cpa auth relogin <name>` | Delete `<name>` and tell you which `cpa login` to run next. |
+| `cpa usage [-l 1h\|6h\|24h\|7d\|all] [-s SOURCE]` | Token usage tables (by model and by source/auth-index). |
+| `cpa logs [tail] [-f] [-n N] [-l LEVEL]` | Tail server logs. `-f` follows. |
+| `cpa logs trace <id> [-o file]` | Download the full per-request log blob. |
+| `cpa logs errors` / `cpa logs download <name>` | List/download saved error log files. |
+| `cpa logs clear [-y]` | Wipe the server log buffer. |
+| `cpa config get [key] [--full]` | Print full YAML, or look up a key (dotted path supported). |
+| `cpa config set <key> <value>` | Fast set: `debug`, `request-log`, `logging-to-file`, `usage-statistics-enabled`, `force-model-prefix`, `ws-auth`, `proxy-url`, `routing.strategy`, `request-retry`, `logs-max-total-size-mb`, `quota-exceeded.switch-project`, `quota-exceeded.switch-preview-model`. |
+| `cpa config edit` | Open the YAML in `$EDITOR` (or `nano`) and round-trip the change. |
+| `cpa providers ls [provider]` | List configured provider keys (`gemini\|codex\|claude\|vertex\|openai`). |
+| `cpa providers add-model <provider> <index> <model> [-a alias] [-p priority] [-t test-model]` | Add or update a model alias on a provider key entry. |
+| `cpa providers rm-model <provider> <index> <model>` | Remove a model alias. |
+| `cpa apikeys ls / add [key] / rm <index\|key> [-y]` | Manage downstream proxy api-keys (clients use these to talk to the proxy). |
 
-```bash
-npm install
-npm run build
+## How OAuth works in this CLI
+
+`cpa login codex` (or any of the four providers):
+
+1. Server gives back `{ url, state }` for the OAuth authorization URL (with `is_webui=true`).
+2. CLI prints the URL and tries to open it (`cmd.exe /c start` on WSL → `wslview` → `open` on macOS/Linux native). If everything fails you can copy-paste the printed URL.
+3. CLI polls `GET /get-auth-status?state=…` every 3 s for up to 5 minutes.
+4. On `status: ok` the server has already exchanged the code for a token and written an auth file. CLI lists the newest file matching the provider prefix.
+5. If the auto-callback can't reach the server (uncommon for localhost), pass `--manual` (or wait for the timeout) and paste the redirect URL — the CLI POSTs it to `/oauth-callback`.
+
+`gemini-cli` accepts `--project-id <id>` (or `ALL` to enrol every project the user has access to).
+
+## Config file
+
+Plain JSON at `~/.config/cpa/config.json` (or `%APPDATA%/cpa/config.json` on Windows). Override with `CPA_CONFIG=/path/to/file`.
+
+```json
+{
+  "apiBase": "http://localhost:8317",
+  "managementKey": "…"
+}
 ```
 
-- Output: `dist/index.html` (all assets are inlined).
-- For CLI Proxy API bundling, the release workflow renames it to `management.html`.
-- To preview locally: `npm run preview`
+The file is `chmod 0600` after every write where supported. Treat the management key as sensitive even on a single-user machine.
 
-Tip: opening `dist/index.html` via `file://` may be blocked by browser CORS; serving it (preview/static server) is more reliable.
+## Repo layout
 
-## Connecting to the server
-
-### API address
-
-You can enter any of the following; the UI will normalize it:
-
-- `localhost:8317`
-- `http://192.168.1.10:8317`
-- `https://example.com:8317`
-- `http://example.com:8317/v0/management` (also accepted; the suffix is removed internally)
-
-### Management key (not the same as API keys)
-
-The management key is sent with every request as:
-
-- `Authorization: Bearer <MANAGEMENT_KEY>` (default)
-
-This is different from the proxy `api-keys` you manage inside the UI (those are for client requests to the proxy endpoints).
-
-### Remote management
-
-If you connect from a non-localhost browser, the server must allow remote management (e.g. `allow-remote-management: true`).  
-See `api.md` for the full authentication rules, server-side limits, and edge cases.
-
-## What you can manage (mapped to the UI pages)
-
-- **Dashboard**: connection status, server version/build date, quick counts, model availability snapshot.
-- **Basic Settings**: debug, proxy URL, request retry, quota fallback (switch project or preview models when limits reached), usage statistics, request logging, file logging, WebSocket auth.
-- **API Keys**: manage proxy `api-keys` (add/edit/delete).
-- **AI Providers**:
-  - Gemini/Codex/Claude/Vertex key entries (base URL, headers, proxy, model aliases, excluded models, prefix).
-  - OpenAI-compatible providers (multiple API keys, custom headers, model alias import via `/v1/models`, optional browser-side "chat/completions" test).
-  - Ampcode integration (upstream URL/key, force mappings, model mapping table).
-- **Auth Files**: upload/download/delete JSON credentials, filter/search/pagination, runtime-only indicators, view supported models per credential (when the server supports it), manage OAuth excluded models (supports `*` wildcards), configure OAuth model alias mappings.
-- **OAuth**: start OAuth/device flows for supported providers, poll status, optionally submit callback `redirect_url`; includes iFlow cookie import.
-- **Quota Management**: manage quota limits and usage for Claude, Antigravity, Codex, Gemini CLI, and other providers.
-- **Usage**: requests/tokens charts (hour/day), per-API & per-model breakdown, cached/reasoning token breakdown, RPM/TPM window, optional cost estimation with locally-saved model pricing.
-- **Config**: edit `/config.yaml` in-browser with YAML highlighting + search, then save/reload.
-- **Logs**: tail logs with incremental polling, auto-refresh, search, hide management traffic, clear logs; download request error log files.
-- **System**: quick links + fetch `/v1/models` (grouped view). Requires at least one proxy API key to query models.
-
-## Tech Stack
-
-- React 19 + TypeScript 5.9
-- Vite 7 (single-file build)
-- Zustand (state management)
-- Axios (HTTP client)
-- react-router-dom v7 (HashRouter)
-- Chart.js (data visualization)
-- CodeMirror 6 (YAML editor)
-- SCSS Modules (styling)
-- i18next (internationalization)
-
-## Internationalization
-
-Currently supports three languages:
-
-- English (en)
-- Simplified Chinese (zh-CN)
-- Russian (ru)
-
-The UI language is automatically detected from browser settings and can be manually switched at the bottom of the page.
-
-## Browser Compatibility
-
-- Build target: `ES2020`
-- Supports modern browsers (Chrome, Firefox, Safari, Edge)
-- Responsive layout for mobile and tablet access
-
-## Build & release notes
-
-- Vite produces a **single HTML** output (`dist/index.html`) with all assets inlined (via `vite-plugin-singlefile`).
-- Tagging `vX.Y.Z` triggers `.github/workflows/release.yml` to publish `dist/management.html`.
-- The UI version shown in the footer is injected at build time (env `VERSION`, git tag, or `package.json` fallback).
-
-## Security notes
-
-- The management key is stored in browser `localStorage` using a lightweight obfuscation format (`enc::v1::...`) to avoid plaintext storage; treat it as sensitive.
-- Use a dedicated browser profile/device for management. Be cautious when enabling remote management and evaluate its exposure surface.
-
-## Troubleshooting
-
-- **Can’t connect / 401**: confirm the API address and management key; remote access may require enabling remote management in the server config.
-- **Repeated auth failures**: the server may temporarily block remote IPs.
-- **Logs page missing**: enable “Logging to file” in Basic Settings; the navigation item is shown only when file logging is enabled.
-- **Some features show “unsupported”**: the backend may be too old or the endpoint is disabled/absent (common for model lists per auth file, excluded models, logs).
-- **OpenAI provider test fails**: the test runs in the browser and depends on network/CORS of the provider endpoint; a failure here does not always mean the server cannot reach it.
-
-## Development
-
-```bash
-npm run dev        # Vite dev server
-npm run build      # tsc + Vite build
-npm run preview    # serve dist locally
-npm run lint       # ESLint (fails on warnings)
-npm run format     # Prettier
-npm run type-check # tsc --noEmit
+```
+src/
+  cli/
+    index.ts                    # bin entry, commander setup
+    commands/                   # one file per subcommand
+    state/                      # config + bootstrap (axios singleton init)
+    ui/                         # browser opener, table builder, spinner
+  services/api/                 # wire-format clients (reused from upstream SPA)
+  utils/                        # helpers (usage, latency, log parsing, …)
+  types/                        # shared TS types
 ```
 
-## Contributing
+`src/services/api/*` is intentionally untouched apart from `client.ts` losing two `window.dispatchEvent` lines. That folder is the value carried over from the original WebUI.
 
-Issues and PRs are welcome. Please include:
+## Build
 
-- Reproduction steps (server version + UI version)
-- Screenshots for UI changes
-- Verification notes (`npm run lint`, `npm run type-check`)
+| Command | What it does |
+|---|---|
+| `bun run dev -- <args>` | Run the CLI from source. |
+| `bun run build` | Bundle to `dist/cpa.js` (still needs `bun` to run). |
+| `bun run build:bin` | Compile to `dist/cpa`, a self-contained executable. |
+| `bun run type-check` | `tsc --noEmit`. |
+
+Cross-compile per-platform:
+
+```bash
+bun build src/cli/index.ts --compile --target=bun-linux-x64   --outfile dist/cpa-linux-x64
+bun build src/cli/index.ts --compile --target=bun-windows-x64 --outfile dist/cpa-win-x64.exe
+bun build src/cli/index.ts --compile --target=bun-darwin-arm64 --outfile dist/cpa-mac-arm64
+```
 
 ## License
 
-MIT
+MIT — same as the upstream project.
