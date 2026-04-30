@@ -7,6 +7,10 @@ import { registerVersionCommand } from './commands/version';
 import { registerLoginCommand } from './commands/login';
 import { registerAuthCommand } from './commands/auth';
 import { registerUsageCommand } from './commands/usage';
+import { registerLogsCommand } from './commands/logs';
+import { registerConfigCommand } from './commands/config';
+import { registerProvidersCommand } from './commands/providers';
+import { registerApiKeysCommand } from './commands/apikeys';
 
 const program = new Command();
 
@@ -34,6 +38,10 @@ registerVersionCommand(program);
 registerLoginCommand(program);
 registerAuthCommand(program);
 registerUsageCommand(program);
+registerLogsCommand(program);
+registerConfigCommand(program);
+registerProvidersCommand(program);
+registerApiKeysCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const error = err as Error & { code?: string };
