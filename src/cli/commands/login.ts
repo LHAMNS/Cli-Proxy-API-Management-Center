@@ -1,58 +1,138 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
-import prompts from 'prompts';
+import readline from 'node:readline';
 import { oauthApi, type OAuthProvider } from '@/services/api/oauth';
 import { authFilesApi } from '@/services/api/authFiles';
-import { openUrl } from '../ui/browser';
+import { isWsl, openUrl } from '../ui/browser';
 import { startSpinner } from '../ui/spinner';
 
 const SUPPORTED_PROVIDERS = ['codex', 'anthropic', 'antigravity', 'gemini-cli'] as const;
 type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
 
 const POLL_INTERVAL_MS = 3000;
-const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
 const isSupportedProvider = (value: string): value is SupportedProvider =>
   (SUPPORTED_PROVIDERS as readonly string[]).includes(value);
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-async function pollUntilDone(state: string): Promise<'ok' | 'error' | 'timeout'> {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const res = await oauthApi.getAuthStatus(state);
-      if (res.status === 'ok') return 'ok';
-      if (res.status === 'error') {
-        throw new Error(res.error || 'Provider returned error.');
-      }
-    } catch (err) {
-      throw err;
-    }
-    await sleep(POLL_INTERVAL_MS);
-  }
-  return 'timeout';
+interface RaceOutcome {
+  kind: 'ok' | 'cancelled' | 'timeout' | 'error';
+  message?: string;
+  via?: 'poll' | 'paste';
 }
 
-async function manualCallback(provider: SupportedProvider): Promise<boolean> {
-  const answer = await prompts({
-    type: 'text',
-    name: 'redirectUrl',
-    message: 'Paste the full redirect URL (with ?code=…&state=…):',
+/**
+ * Run polling and a paste-prompt concurrently. First to succeed wins; the
+ * other is cancelled via AbortController. This is the core fix for WSL where
+ * the provider's auto-redirect to `localhost:<port>` often can't reach the
+ * backend, so the user can paste the URL manually at any time without
+ * waiting for the poll to time out.
+ */
+async function awaitAuthCallback(
+  provider: SupportedProvider,
+  state: string,
+  pollTimeoutMs: number
+): Promise<RaceOutcome> {
+  const ac = new AbortController();
+  let outcome: RaceOutcome = { kind: 'cancelled' };
+  let resolved = false;
+
+  const finish = (next: RaceOutcome) => {
+    if (resolved) return;
+    resolved = true;
+    outcome = next;
+    ac.abort();
+  };
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      ac.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+    });
+
+  const pollTask = (async () => {
+    const deadline = Date.now() + pollTimeoutMs;
+    while (!resolved && Date.now() < deadline) {
+      try {
+        const res = await oauthApi.getAuthStatus(state);
+        if (res.status === 'ok') return finish({ kind: 'ok', via: 'poll' });
+        if (res.status === 'error') {
+          return finish({ kind: 'error', message: res.error, via: 'poll' });
+        }
+      } catch {
+        // Network blip — keep retrying silently.
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    if (!resolved) finish({ kind: 'timeout', via: 'poll' });
+  })();
+
+  const manualTask = (async () => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    const onAbort = () => rl.close();
+    ac.signal.addEventListener('abort', onAbort, { once: true });
+
+    let answer: string | null = null;
+    try {
+      answer = await new Promise<string>((resolve, reject) => {
+        rl.question(
+          chalk.dim('  Paste redirect URL (or press Enter to wait silently): '),
+          resolve
+        );
+        rl.once('close', () => reject(new Error('rl-closed')));
+      });
+    } catch {
+      // rl was closed because polling won. Done.
+      return;
+    } finally {
+      ac.signal.removeEventListener('abort', onAbort);
+      rl.close();
+    }
+
+    if (resolved) return;
+    const trimmed = (answer ?? '').trim();
+    if (!trimmed) {
+      // User pressed Enter empty → fall through to silent polling.
+      console.log(chalk.dim('  Polling silently for browser callback…'));
+      return;
+    }
+
+    try {
+      await oauthApi.submitCallback(provider, trimmed);
+      finish({ kind: 'ok', via: 'paste' });
+    } catch (err) {
+      finish({ kind: 'error', message: (err as Error).message, via: 'paste' });
+    }
+  })();
+
+  await Promise.allSettled([pollTask, manualTask]);
+  return outcome;
+}
+
+async function manualOnlyCallback(provider: SupportedProvider): Promise<RaceOutcome> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question(chalk.cyan('Paste full redirect URL (with ?code=…&state=…): '), resolve);
   });
-  const redirectUrl = String(answer.redirectUrl || '').trim();
-  if (!redirectUrl) {
-    console.error(chalk.red('No URL entered, aborting.'));
-    return false;
-  }
-  const spinner = startSpinner('Submitting callback…');
+  rl.close();
+  const trimmed = answer.trim();
+  if (!trimmed) return { kind: 'cancelled' };
+
   try {
-    await oauthApi.submitCallback(provider, redirectUrl);
-    spinner.succeed('Callback accepted.');
-    return true;
+    await oauthApi.submitCallback(provider, trimmed);
+    return { kind: 'ok', via: 'paste' };
   } catch (err) {
-    spinner.fail(`Callback rejected: ${(err as Error).message}`);
-    return false;
+    return { kind: 'error', message: (err as Error).message, via: 'paste' };
   }
 }
 
@@ -60,7 +140,7 @@ async function findNewestAuthFile(provider: SupportedProvider): Promise<string |
   const prefix = provider === 'gemini-cli' ? 'gemini' : provider;
   try {
     const res = await authFilesApi.list();
-    const files = (res.files ?? []) as Array<{ name?: string }>;
+    const files = res.files ?? [];
     const matches = files
       .map((f) => String(f?.name ?? ''))
       .filter((name) => name.toLowerCase().startsWith(prefix));
@@ -71,18 +151,39 @@ async function findNewestAuthFile(provider: SupportedProvider): Promise<string |
   }
 }
 
+function printWslHint(): void {
+  console.log(
+    chalk.yellow(
+      'WSL detected. The OAuth provider may redirect your browser to a localhost\n' +
+        '  URL that can\'t reach the backend inside WSL. If you see "site can\'t be\n' +
+        '  reached" in the browser after authorising, copy the URL it tried to visit\n' +
+        '  and paste it below — that completes the login through the management API.'
+    )
+  );
+}
+
 export function registerLoginCommand(program: Command): void {
   program
     .command('login <provider>')
     .description(
-      `OAuth login for one of: ${SUPPORTED_PROVIDERS.join(', ')}. Opens the system browser.`
+      `OAuth login for one of: ${SUPPORTED_PROVIDERS.join(', ')}. Opens the system browser ` +
+        `and races auto-poll with a paste prompt — whichever completes first wins.`
     )
-    .option('-p, --project-id <id>', 'gemini-cli only: GCP project ID, or "ALL" for every project.')
-    .option('--manual', 'Skip auto-poll; paste the redirect URL manually instead.')
+    .option(
+      '-p, --project-id <id>',
+      'gemini-cli only: GCP project ID, or "ALL" for every project.'
+    )
+    .option('--manual', 'Skip auto-poll; only prompt for a pasted redirect URL.')
+    .option(
+      '--timeout <seconds>',
+      'How long the auto-poll keeps trying before timing out.',
+      (v) => Number(v),
+      DEFAULT_POLL_TIMEOUT_MS / 1000
+    )
     .action(
       async (
         providerArg: string,
-        opts: { projectId?: string; manual?: boolean }
+        opts: { projectId?: string; manual?: boolean; timeout?: number }
       ) => {
         const provider = providerArg.toLowerCase();
         if (!isSupportedProvider(provider)) {
@@ -113,28 +214,42 @@ export function registerLoginCommand(program: Command): void {
 
         await openUrl(url);
 
+        if (await isWsl()) {
+          printWslHint();
+        }
+
+        let outcome: RaceOutcome;
         if (opts.manual || !state) {
-          const ok = await manualCallback(provider);
-          if (!ok) {
+          outcome = await manualOnlyCallback(provider);
+        } else {
+          const timeoutMs = Math.max(
+            10_000,
+            (opts.timeout ?? DEFAULT_POLL_TIMEOUT_MS / 1000) * 1000
+          );
+          outcome = await awaitAuthCallback(provider, state, timeoutMs);
+        }
+
+        switch (outcome.kind) {
+          case 'ok': {
+            const via = outcome.via === 'paste' ? 'manual paste' : 'auto-callback';
+            console.log(chalk.green(`✔ Authorised (${via}).`));
+            break;
+          }
+          case 'timeout': {
+            console.error(
+              chalk.red(`Timed out waiting for browser callback.`),
+              `Re-run with \`cpa login ${provider} --manual\` to paste the URL directly.`
+            );
             process.exitCode = 1;
             return;
           }
-        } else {
-          const spinner = startSpinner('Waiting for browser callback (5 min)…');
-          try {
-            const result = await pollUntilDone(state);
-            if (result === 'ok') {
-              spinner.succeed('Authorized.');
-            } else {
-              spinner.warn('Timed out. You can paste the redirect URL manually.');
-              const ok = await manualCallback(provider);
-              if (!ok) {
-                process.exitCode = 1;
-                return;
-              }
-            }
-          } catch (err) {
-            spinner.fail(`Auth failed: ${(err as Error).message}`);
+          case 'error': {
+            console.error(chalk.red(`Auth failed: ${outcome.message ?? 'unknown error'}`));
+            process.exitCode = 1;
+            return;
+          }
+          case 'cancelled': {
+            console.error(chalk.yellow('Cancelled.'));
             process.exitCode = 1;
             return;
           }
@@ -143,7 +258,9 @@ export function registerLoginCommand(program: Command): void {
         const newest = await findNewestAuthFile(provider);
         if (newest) {
           console.log(`${chalk.green('●')} New auth file:  ${chalk.bold(newest)}`);
-          console.log(chalk.dim('  Use `cpa auth ls` to inspect, `cpa auth rm <name>` to remove.'));
+          console.log(
+            chalk.dim('  Use `cpa auth ls` to inspect, `cpa auth rm <name>` to remove.')
+          );
         } else {
           console.log(chalk.dim('Auth file written; run `cpa auth ls` to confirm.'));
         }
