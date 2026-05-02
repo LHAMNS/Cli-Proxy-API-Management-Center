@@ -22,8 +22,12 @@ function generateKey(): string {
   return `sk-${out.join('')}`;
 }
 
-async function listKeys(): Promise<void> {
+async function listKeys(asJson: boolean): Promise<void> {
   const keys = await apiKeysApi.list();
+  if (asJson) {
+    console.log(JSON.stringify(keys, null, 2));
+    return;
+  }
   if (!keys.length) {
     console.log(chalk.dim('No proxy API keys configured.'));
     return;
@@ -80,7 +84,10 @@ export function registerApiKeysCommand(program: Command): void {
   apikeys
     .command('ls')
     .description('List proxy api-keys.')
-    .action(listKeys);
+    .option('--json', 'Output JSON (full keys, unmasked) instead of a table.')
+    .action(async (opts: { json?: boolean }) => {
+      await listKeys(Boolean(opts.json));
+    });
 
   apikeys
     .command('add [key]')

@@ -28,28 +28,35 @@ function modifiedString(file: AuthFileItem): string {
   return chalk.dim('—');
 }
 
-async function listAuthFiles(showAll: boolean): Promise<void> {
+async function listAuthFiles(showAll: boolean, asJson: boolean): Promise<void> {
   const res = await authFilesApi.list();
   const files = res.files ?? [];
-  if (files.length === 0) {
+  const visible = showAll ? files : files.filter((f) => f.disabled !== true);
+
+  if (asJson) {
+    console.log(JSON.stringify(visible, null, 2));
+    return;
+  }
+
+  if (visible.length === 0) {
     console.log(chalk.dim('No auth files.'));
     return;
   }
 
   const table = makeTable(['Name', 'Type', 'Status', 'Size', 'Modified']);
-  files.forEach((file) => {
-    const disabled = file.disabled === true;
-    if (!showAll && disabled) return;
+  visible.forEach((file) => {
     table.push([
       file.name,
       shortType(file),
-      statusBadge(disabled),
+      statusBadge(file.disabled === true),
       typeof file.size === 'number' ? formatFileSize(file.size) : chalk.dim('—'),
       modifiedString(file),
     ]);
   });
   console.log(table.toString());
-  console.log(chalk.dim(`Total: ${files.length}` + (showAll ? '' : ' (use --all to include disabled)')));
+  console.log(
+    chalk.dim(`Total: ${files.length}` + (showAll ? '' : ' (use --all to include disabled)'))
+  );
 }
 
 async function deleteFiles(names: string[], all: boolean, force: boolean): Promise<void> {
@@ -144,8 +151,9 @@ export function registerAuthCommand(program: Command): void {
     .command('ls')
     .description('List auth files.')
     .option('-a, --all', 'Include disabled entries.')
-    .action(async (opts: { all?: boolean }) => {
-      await listAuthFiles(Boolean(opts.all));
+    .option('--json', 'Output JSON instead of a table.')
+    .action(async (opts: { all?: boolean; json?: boolean }) => {
+      await listAuthFiles(Boolean(opts.all), Boolean(opts.json));
     });
 
   auth

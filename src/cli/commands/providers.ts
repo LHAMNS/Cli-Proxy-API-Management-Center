@@ -1,6 +1,8 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { providersApi } from '@/services/api/providers';
+import { modelsApi } from '@/services/api/models';
 import type {
   GeminiKeyConfig,
   ModelAlias,
@@ -8,6 +10,7 @@ import type {
   ProviderKeyConfig,
 } from '@/types';
 import { makeTable, maskedKeyTail } from '../ui/tables';
+import { startSpinner } from '../ui/spinner';
 
 type ProviderKind = 'gemini' | 'codex' | 'claude' | 'vertex' | 'openai';
 const PROVIDER_KINDS: ProviderKind[] = ['gemini', 'codex', 'claude', 'vertex', 'openai'];
@@ -23,9 +26,13 @@ interface KeyedProviderEntry {
   prefix?: string;
 }
 
-async function listProvider(kind: ProviderKind): Promise<void> {
+async function listProvider(kind: ProviderKind, asJson: boolean): Promise<void> {
   if (kind === 'openai') {
     const list = await providersApi.getOpenAIProviders();
+    if (asJson) {
+      console.log(JSON.stringify(list, null, 2));
+      return;
+    }
     if (!list.length) {
       console.log(chalk.dim('No OpenAI-compatible providers configured.'));
       return;
@@ -36,6 +43,10 @@ async function listProvider(kind: ProviderKind): Promise<void> {
   }
 
   const list = await fetchKeyConfigs(kind);
+  if (asJson) {
+    console.log(JSON.stringify(list, null, 2));
+    return;
+  }
   if (!list.length) {
     console.log(chalk.dim(`No ${kind} keys configured.`));
     return;
@@ -172,6 +183,82 @@ function removeModel(models: ModelAlias[] | undefined, model: string): ModelAlia
   return (models ?? []).filter((m) => m.name !== model);
 }
 
+interface UpstreamModel {
+  name: string;
+  alias?: string;
+}
+
+async function fetchUpstreamModels(
+  kind: ProviderKind,
+  index: number
+): Promise<UpstreamModel[]> {
+  if (kind === 'openai') {
+    const list = await providersApi.getOpenAIProviders();
+    const entry = list[index];
+    if (!entry) throw new Error(`No openai-compatibility entry at index ${index}.`);
+    const firstKey = entry.apiKeyEntries[0]?.apiKey?.trim();
+    if (!firstKey) throw new Error(`Provider "${entry.name}" has no api-key entries.`);
+    return modelsApi.fetchModelsViaApiCall(entry.baseUrl, firstKey, entry.headers ?? {});
+  }
+
+  const list = await fetchKeyConfigs(kind);
+  const entry = list[index];
+  if (!entry) throw new Error(`No ${kind} entry at index ${index}.`);
+  const apiKey = entry.apiKey?.trim();
+  if (!apiKey) throw new Error(`${kind} entry #${index} has no api-key.`);
+  const baseUrl = entry.baseUrl ?? '';
+
+  switch (kind) {
+    case 'gemini':
+      return modelsApi.fetchGeminiModelsViaApiCall(baseUrl, apiKey);
+    case 'claude':
+      return modelsApi.fetchClaudeModelsViaApiCall(baseUrl, apiKey);
+    case 'codex':
+      return modelsApi.fetchV1ModelsViaApiCall(baseUrl, apiKey);
+    case 'vertex':
+      throw new Error(
+        'vertex does not expose a model-list endpoint here; pass <model> explicitly.'
+      );
+  }
+}
+
+async function pickUpstreamModel(
+  kind: ProviderKind,
+  index: number
+): Promise<string | null> {
+  const spinner = startSpinner(`Fetching available models from upstream…`);
+  let models: UpstreamModel[];
+  try {
+    models = await fetchUpstreamModels(kind, index);
+    spinner.succeed(`Found ${models.length} model(s).`);
+  } catch (err) {
+    spinner.fail(`Could not fetch models: ${(err as Error).message}`);
+    return null;
+  }
+
+  const candidates = models
+    .map((m) => String(m.name ?? '').trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  if (candidates.length === 0) {
+    console.error(chalk.yellow('Upstream returned no models.'));
+    return null;
+  }
+
+  const choice = await prompts({
+    type: 'autocomplete',
+    name: 'model',
+    message: 'Pick a model',
+    choices: candidates.map((name) => ({ title: name, value: name })),
+    suggest: (input: string, choices: Array<{ title: string }>) =>
+      Promise.resolve(
+        choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase()))
+      ),
+  });
+  return typeof choice.model === 'string' ? choice.model : null;
+}
+
 async function addModel(
   kind: ProviderKind,
   index: number,
@@ -223,20 +310,35 @@ export function registerProvidersCommand(program: Command): void {
   providers
     .command('ls [provider]')
     .description('List configured provider keys (all providers if omitted).')
-    .action(async (provider?: string) => {
+    .option('--json', 'Output JSON instead of a table.')
+    .action(async (provider: string | undefined, opts: { json?: boolean }) => {
+      const asJson = Boolean(opts.json);
       if (provider) {
-        await listProvider(ensureProviderKind(provider));
+        await listProvider(ensureProviderKind(provider), asJson);
+        return;
+      }
+      if (asJson) {
+        const result: Record<string, unknown> = {};
+        for (const kind of PROVIDER_KINDS) {
+          result[kind] =
+            kind === 'openai'
+              ? await providersApi.getOpenAIProviders()
+              : await fetchKeyConfigs(kind);
+        }
+        console.log(JSON.stringify(result, null, 2));
         return;
       }
       for (const kind of PROVIDER_KINDS) {
-        await listProvider(kind);
+        await listProvider(kind, false);
         console.log('');
       }
     });
 
   providers
-    .command('add-model <provider> <index> <model>')
-    .description('Add or update a model alias on a provider key entry.')
+    .command('add-model <provider> <index> [model]')
+    .description(
+      'Add or update a model alias. With [model] omitted, fetches upstream models and prompts you to pick.'
+    )
     .option('-a, --alias <alias>', 'Public alias the model is exposed as.')
     .option('-p, --priority <n>', 'Priority weight.', (v) => Number(v))
     .option('-t, --test-model <name>', 'Override the connectivity-test model.')
@@ -244,12 +346,23 @@ export function registerProvidersCommand(program: Command): void {
       async (
         provider: string,
         index: string,
-        model: string,
+        model: string | undefined,
         opts: { alias?: string; priority?: number; testModel?: string }
       ) => {
         const idx = Number(index);
         if (!Number.isInteger(idx) || idx < 0) throw new Error(`Index must be a non-negative integer.`);
-        await addModel(ensureProviderKind(provider), idx, model, opts);
+        const kind = ensureProviderKind(provider);
+
+        let resolvedModel = model?.trim();
+        if (!resolvedModel) {
+          const picked = await pickUpstreamModel(kind, idx);
+          if (!picked) {
+            process.exitCode = 1;
+            return;
+          }
+          resolvedModel = picked;
+        }
+        await addModel(kind, idx, resolvedModel, opts);
       }
     );
 

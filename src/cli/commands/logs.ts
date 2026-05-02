@@ -89,6 +89,67 @@ async function tailLogs(opts: TailOptions): Promise<void> {
   }
 }
 
+interface TraceCandidate {
+  requestId: string;
+  timestamp?: string;
+  method?: string;
+  path?: string;
+  statusCode?: number;
+  level?: LogLevel;
+}
+
+async function collectTraceCandidates(limit: number): Promise<TraceCandidate[]> {
+  const res = await logsApi.fetchLogs();
+  const lines = res.lines ?? [];
+  const seen = new Map<string, TraceCandidate>();
+  // Walk newest-first so the latest occurrence wins.
+  for (let i = lines.length - 1; i >= 0 && seen.size < limit; i--) {
+    const parsed = parseLogLine(lines[i]);
+    if (!parsed.requestId || seen.has(parsed.requestId)) continue;
+    seen.set(parsed.requestId, {
+      requestId: parsed.requestId,
+      timestamp: parsed.timestamp,
+      method: parsed.method,
+      path: parsed.path,
+      statusCode: parsed.statusCode,
+      level: parsed.level,
+    });
+  }
+  return [...seen.values()];
+}
+
+async function pickRequestId(limit: number): Promise<string | null> {
+  const candidates = await collectTraceCandidates(limit);
+  if (candidates.length === 0) {
+    console.error(
+      chalk.yellow(
+        'No request IDs found in recent logs. Pass <id> directly, or run a request first.'
+      )
+    );
+    return null;
+  }
+  const choice = await prompts({
+    type: 'autocomplete',
+    name: 'id',
+    message: 'Pick a request ID',
+    choices: candidates.map((c) => {
+      const time = c.timestamp ? c.timestamp.replace(/^\d{4}-\d{2}-\d{2}[ T]/, '') : '????';
+      const status = typeof c.statusCode === 'number' ? statusColor(c.statusCode) : '   ';
+      const method = c.method ?? '   ';
+      const requestPath = c.path ?? '';
+      return {
+        title: `${time}  ${status}  ${method.padEnd(6)}  ${requestPath}  ${chalk.dim(c.requestId)}`,
+        value: c.requestId,
+      };
+    }),
+    suggest: (input: string, choices: Array<{ title: string }>) =>
+      Promise.resolve(
+        choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase()))
+      ),
+  });
+  return typeof choice.id === 'string' ? choice.id : null;
+}
+
 async function downloadTrace(id: string, dest?: string): Promise<void> {
   const response = await logsApi.downloadRequestLogById(id);
   const blob = response.data as { text: () => Promise<string> } | string | Buffer;
@@ -178,11 +239,28 @@ export function registerLogsCommand(program: Command): void {
     });
 
   logs
-    .command('trace <id>')
-    .description('Download the full per-request log blob by request ID.')
+    .command('trace [id]')
+    .description(
+      'Download the full per-request log blob. With no <id>, lists recent IDs and prompts you to pick one.'
+    )
     .option('-o, --out <file>', 'Write to file instead of stdout.')
-    .action(async (id: string, opts: { out?: string }) => {
-      await downloadTrace(id, opts.out);
+    .option(
+      '-n, --tail <n>',
+      'When picking interactively, scan at most N recent IDs (default 50).',
+      (v) => Number(v),
+      50
+    )
+    .action(async (id: string | undefined, opts: { out?: string; tail?: number }) => {
+      let resolvedId = id?.trim();
+      if (!resolvedId) {
+        const picked = await pickRequestId(opts.tail ?? 50);
+        if (!picked) {
+          process.exitCode = 1;
+          return;
+        }
+        resolvedId = picked;
+      }
+      await downloadTrace(resolvedId, opts.out);
     });
 
   logs

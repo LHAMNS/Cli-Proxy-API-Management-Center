@@ -161,17 +161,51 @@ function filterDetails(
   });
 }
 
+function buildJsonReport(filtered: UsageDetail[]): Record<string, unknown> {
+  const buckets = bucketByModel(filtered);
+  const keyStats = computeKeyStatsFromDetails(filtered);
+  return {
+    requests: filtered.length,
+    byModel: buckets.map((b) => {
+      const latency = calculateLatencyStatsFromDetails(b.details);
+      return {
+        model: b.model,
+        requests: b.requests,
+        failed: b.failed,
+        tokens: {
+          input: b.inputTokens,
+          cached: b.cachedTokens,
+          output: b.outputTokens,
+          reasoning: b.reasoningTokens,
+          total: b.totalTokens,
+        },
+        averageLatencyMs: latency.averageMs,
+        sampleCount: latency.sampleCount,
+      };
+    }),
+    bySource: keyStats.bySource,
+    byAuthIndex: keyStats.byAuthIndex,
+    details: filtered,
+  };
+}
+
 export function registerUsageCommand(program: Command): void {
   program
     .command('usage')
     .description('Show token usage statistics aggregated by model and by key/auth.')
     .option('-l, --last <window>', 'Time window: 1h, 6h, 24h, 7d, all (default: 24h)', '24h')
     .option('-s, --source <source>', 'Filter by source (e.g. k:abcd…)')
-    .action(async (opts: { last?: string; source?: string }) => {
+    .option('--json', 'Output JSON (full bucket + raw details) instead of tables.')
+    .action(async (opts: { last?: string; source?: string; json?: boolean }) => {
       const windowMs = parseDuration(opts.last ?? '24h');
       const data = await usageApi.getUsage();
       const allDetails = collectUsageDetails(data);
       const filtered = filterDetails(allDetails, windowMs, opts.source?.trim() || undefined);
+
+      if (opts.json) {
+        console.log(JSON.stringify(buildJsonReport(filtered), null, 2));
+        return;
+      }
 
       const windowLabel = windowMs === null ? 'all time' : opts.last ?? '24h';
       console.log(chalk.bold(`Usage (${windowLabel})  —  ${filtered.length} requests`));
