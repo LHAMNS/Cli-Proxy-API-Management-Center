@@ -11,6 +11,7 @@ import { registerLogsCommand } from './commands/logs';
 import { registerConfigCommand } from './commands/config';
 import { registerProvidersCommand } from './commands/providers';
 import { registerApiKeysCommand } from './commands/apikeys';
+import { registerDoctorCommand } from './commands/doctor';
 
 const program = new Command();
 
@@ -20,7 +21,7 @@ program
   .version('0.1.0');
 
 // Subcommands that don't need a configured key (they bootstrap differently).
-const NO_KEY_REQUIRED = new Set(['connect', 'version', 'help']);
+const NO_KEY_REQUIRED = new Set(['connect', 'version', 'help', 'doctor']);
 
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
@@ -42,6 +43,7 @@ registerLogsCommand(program);
 registerConfigCommand(program);
 registerProvidersCommand(program);
 registerApiKeysCommand(program);
+registerDoctorCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const error = err as Error & { code?: string };

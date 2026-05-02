@@ -71,6 +71,7 @@ cpa logs trace <request-id>     # full per-request blob
 | `cpa providers add-model <provider> <index> [model] [-a alias] [-p priority] [-t test-model]` | Add or update a model alias. With `[model]` omitted, fetches upstream models and prompts you to pick. |
 | `cpa providers rm-model <provider> <index> <model>` | Remove a model alias. |
 | `cpa apikeys ls [--json] / add [key] / rm <index\|key> [-y]` | Manage downstream proxy api-keys (clients use these to talk to the proxy). |
+| `cpa doctor` | Diagnose WSL/network issues that block OAuth auto-callback. |
 
 Most `ls`-style commands and `cpa usage` accept `--json` for piping into `jq`.
 
@@ -87,7 +88,27 @@ Most `ls`-style commands and `cpa usage` accept `--json` for piping into `jq`.
 
 `gemini-cli` accepts `--project-id <id>` (or `ALL` to enrol every project the user has access to).
 
-`--manual` skips auto-poll and only accepts a pasted redirect URL — useful when you already know auto-callback won't work (e.g., Anthropic's `console.anthropic.com` flow).
+`--manual` skips auto-poll and only accepts a pasted value (URL, bare code, or `code#state`).
+
+`--code <code>` finishes the exchange without opening the browser at all — useful when you already have a code from a previous failed attempt or from another machine.
+
+The paste prompt accepts three formats:
+
+| Pasted value | What we do |
+|---|---|
+| `http://...?code=...&state=...` | Forward as-is to `/oauth-callback`. |
+| `code#state` (Anthropic console format) | Split on `#`, build a synthetic redirect URL, submit. |
+| Bare code (e.g. `abc123def…`) | Use the state from `startAuth`, build a synthetic redirect URL, submit. |
+
+### Diagnose WSL networking with `cpa doctor`
+
+If `cpa login` keeps hanging or timing out, run `cpa doctor`. It checks:
+
+- Whether the backend URL is reachable from inside WSL (curl-style probe).
+- Whether the backend URL is reachable from the **Windows host** (via `cmd.exe + curl.exe`). This is the real test for OAuth auto-callback because the browser lives on Windows.
+- Whether `~/.wslconfig` has `networkingMode=mirrored` (recommended for reliable localhost forwarding).
+
+If the Windows-side reach fails, the doctor prints concrete fixes (enable mirrored mode, check 0.0.0.0 binding, check Windows Firewall, fall back to `--manual`).
 
 ### WSL OAuth notes — read this if `cpa login` hangs
 

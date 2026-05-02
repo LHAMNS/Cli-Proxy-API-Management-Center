@@ -15,6 +15,42 @@ const DEFAULT_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const isSupportedProvider = (value: string): value is SupportedProvider =>
   (SUPPORTED_PROVIDERS as readonly string[]).includes(value);
 
+/**
+ * Convert whatever the user pasted (a full URL, a bare code, or `code#state`
+ * which Claude/Anthropic-style flows show on the success page) into a
+ * synthetic redirect URL the backend's /oauth-callback can parse.
+ *
+ * Returns null if the input is empty.
+ */
+function buildSyntheticRedirect(input: string, fallbackState: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Already a full URL — pass through. Backend extracts code+state from query.
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+  // Try to detect "code#state" (Claude/Anthropic display format) or "code/state".
+  let code = trimmed;
+  let state = fallbackState;
+
+  if (trimmed.includes('#')) {
+    const [c, s] = trimmed.split('#', 2);
+    code = c.trim();
+    if (s?.trim()) state = s.trim();
+  } else if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) {
+    const [c, s] = trimmed.split('/', 2);
+    code = c.trim();
+    state = s.trim();
+  }
+
+  if (!code) return null;
+
+  const url = new URL('http://localhost/oauth/callback');
+  url.searchParams.set('code', code);
+  url.searchParams.set('state', state);
+  return url.toString();
+}
+
 interface RaceOutcome {
   kind: 'ok' | 'cancelled' | 'timeout' | 'error';
   message?: string;
@@ -100,15 +136,15 @@ async function awaitAuthCallback(
     }
 
     if (resolved) return;
-    const trimmed = (answer ?? '').trim();
-    if (!trimmed) {
+    const synthetic = buildSyntheticRedirect(answer ?? '', state);
+    if (!synthetic) {
       // User pressed Enter empty → fall through to silent polling.
       console.log(chalk.dim('  Polling silently for browser callback…'));
       return;
     }
 
     try {
-      await oauthApi.submitCallback(provider, trimmed);
+      await oauthApi.submitCallback(provider, synthetic);
       finish({ kind: 'ok', via: 'paste' });
     } catch (err) {
       finish({ kind: 'error', message: (err as Error).message, via: 'paste' });
@@ -119,17 +155,23 @@ async function awaitAuthCallback(
   return outcome;
 }
 
-async function manualOnlyCallback(provider: SupportedProvider): Promise<RaceOutcome> {
+async function manualOnlyCallback(
+  provider: SupportedProvider,
+  state: string
+): Promise<RaceOutcome> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const answer = await new Promise<string>((resolve) => {
-    rl.question(chalk.cyan('Paste full redirect URL (with ?code=…&state=…): '), resolve);
+    rl.question(
+      chalk.cyan('Paste the redirect URL OR just the code (or code#state): '),
+      resolve
+    );
   });
   rl.close();
-  const trimmed = answer.trim();
-  if (!trimmed) return { kind: 'cancelled' };
+  const synthetic = buildSyntheticRedirect(answer, state);
+  if (!synthetic) return { kind: 'cancelled' };
 
   try {
-    await oauthApi.submitCallback(provider, trimmed);
+    await oauthApi.submitCallback(provider, synthetic);
     return { kind: 'ok', via: 'paste' };
   } catch (err) {
     return { kind: 'error', message: (err as Error).message, via: 'paste' };
@@ -175,6 +217,10 @@ export function registerLoginCommand(program: Command): void {
     )
     .option('--manual', 'Skip auto-poll; only prompt for a pasted redirect URL.')
     .option(
+      '--code <code>',
+      'Submit a known code (or code#state) directly without opening the browser. Useful when you already authenticated and just need to finish the exchange.'
+    )
+    .option(
       '--timeout <seconds>',
       'How long the auto-poll keeps trying before timing out.',
       (v) => Number(v),
@@ -183,7 +229,7 @@ export function registerLoginCommand(program: Command): void {
     .action(
       async (
         providerArg: string,
-        opts: { projectId?: string; manual?: boolean; timeout?: number }
+        opts: { projectId?: string; manual?: boolean; code?: string; timeout?: number }
       ) => {
         const provider = providerArg.toLowerCase();
         if (!isSupportedProvider(provider)) {
@@ -192,6 +238,48 @@ export function registerLoginCommand(program: Command): void {
             `Try one of: ${SUPPORTED_PROVIDERS.join(', ')}.`
           );
           process.exitCode = 2;
+          return;
+        }
+
+        // --code <code>: skip browser entirely. We still need a state from
+        // the backend (otherwise it'll reject the callback), so we call
+        // startAuth to register one before submitting.
+        if (opts.code) {
+          const startSpin = startSpinner('Registering auth state…');
+          let state: string | undefined;
+          try {
+            const res = await oauthApi.startAuth(
+              provider as OAuthProvider,
+              provider === 'gemini-cli' ? { projectId: opts.projectId } : undefined
+            );
+            state = res.state;
+            startSpin.succeed('State registered.');
+          } catch (err) {
+            startSpin.fail(`Could not register state: ${(err as Error).message}`);
+            process.exitCode = 1;
+            return;
+          }
+          if (!state) {
+            console.error(chalk.red('Server did not return a state token; cannot use --code.'));
+            process.exitCode = 1;
+            return;
+          }
+          const synthetic = buildSyntheticRedirect(opts.code, state);
+          if (!synthetic) {
+            console.error(chalk.red('Empty --code value.'));
+            process.exitCode = 2;
+            return;
+          }
+          try {
+            await oauthApi.submitCallback(provider as OAuthProvider, synthetic);
+            console.log(chalk.green('✔ Authorised (direct --code).'));
+          } catch (err) {
+            console.error(chalk.red(`Submit failed: ${(err as Error).message}`));
+            process.exitCode = 1;
+            return;
+          }
+          const newest = await findNewestAuthFile(provider);
+          if (newest) console.log(`${chalk.green('●')} New auth file:  ${chalk.bold(newest)}`);
           return;
         }
 
@@ -220,7 +308,7 @@ export function registerLoginCommand(program: Command): void {
 
         let outcome: RaceOutcome;
         if (opts.manual || !state) {
-          outcome = await manualOnlyCallback(provider);
+          outcome = await manualOnlyCallback(provider, state ?? '');
         } else {
           const timeoutMs = Math.max(
             10_000,
