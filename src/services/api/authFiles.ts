@@ -401,6 +401,15 @@ export const authFilesApi = {
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
 
+  /**
+   * Patch editable auth fields (priority/prefix/proxy_url/headers/note).
+   * Backend deletes `priority` metadata when 0 is sent — pass 0 to clear.
+   */
+  setFields: (
+    name: string,
+    fields: { priority?: number; prefix?: string; proxy_url?: string; note?: string; headers?: Record<string, string> }
+  ) => apiClient.patch<{ status: string }>('/auth-files/fields', { name, ...fields }),
+
   uploadFiles: async (files: File[]): Promise<AuthFileBatchUploadResult> => {
     const requestedNames = files.map((file) => file.name);
     if (requestedNames.length === 0) {
