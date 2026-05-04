@@ -37,19 +37,31 @@ cpa connect --url http://localhost:8317 --key <management-key>
 cpa login codex
 cpa login gemini-cli --project-id ALL
 
-# 3. Inspect the credentials that landed.
+# 3. Inspect the credentials that landed + a one-screen overview.
 cpa auth ls
+cpa                              # bare invocation = `cpa status` dashboard
 
 # 4. Watch usage + recent requests.
 cpa usage --last 24h
+cpa usage account <name>         # per-account drill-down
 cpa logs --follow
 cpa logs trace <request-id>     # full per-request blob
+
+# 5. Manage multi-account routing.
+cpa lb status                    # see ACTIVE / STANDBY / DISABLED per account
+cpa lb set codex-foo@bar.json standby
+cpa lb mode fill-first           # or `round-robin`
+
+# 6. Discover provider-specific endpoint URLs (for client config).
+cpa endpoint ls
+cpa endpoint url codex --client-config
 ```
 
 ## Command reference
 
 | Command | What it does |
 |---|---|
+| `cpa` / `cpa status [--json]` | At-a-glance dashboard: server info, accounts grouped by provider with ACTIVE/STANDBY/DISABLED counts, this month's request + token totals, active alerts. Bare `cpa` is an alias. |
 | `cpa connect [-u URL] [-k KEY]` | Save server URL and management key locally. `--show` prints current. `--clear` wipes them. |
 | `cpa version` | Print CLI + server version. |
 | `cpa login <provider> [--project-id ID] [--manual]` | OAuth login. Opens browser, polls every 3 s, falls back to a paste prompt on timeout. |
@@ -60,6 +72,13 @@ cpa logs trace <request-id>     # full per-request blob
 | `cpa auth save <name> <dest>` | Save the credential to a local file. |
 | `cpa auth relogin <name>` | Delete `<name>` and tell you which `cpa login` to run next. |
 | `cpa usage [-l 1h\|6h\|24h\|7d\|all] [-s SOURCE]` | Token usage tables (by model and by source/auth-index). |
+| `cpa usage account <name> [-l 1h\|…\|30d\|all]` | Per-account breakdown: identity, Codex plan info, monthly tokens by type, top models, recent activity. `<name>` accepts the full filename, an email, or a unique substring. |
+| `cpa lb status [--json]` | Print routing strategy + per-account ACTIVE/STANDBY/DISABLED state with health and recent traffic. |
+| `cpa lb mode <round-robin\|fill-first>` | Switch global selector strategy. |
+| `cpa lb set <name> <active\|standby\|disabled>` | Promote/demote one account: ACTIVE = priority 10, STANDBY = priority 0, DISABLED = `disabled=true`. |
+| `cpa endpoint ls [--json]` | Map each provider to its local URL with isolation status (most are isolated by handler type; `/v1/chat/completions` dispatches by model). |
+| `cpa endpoint url <provider> [--client-config]` | Print just the URL for `codex`, `anthropic`, `gemini`, or `gemini-cli`. `--client-config` adds an env-var snippet. |
+| `cpa endpoint plan` | Recipe for running one backend instance per provider when hard isolation is required. |
 | `cpa logs [tail] [-f] [-n N] [-l LEVEL]` | Tail server logs. `-f` follows. |
 | `cpa logs trace [id] [-o file] [-n 50]` | Download the full per-request log blob. With `[id]` omitted, scans recent logs and prompts you to pick one. |
 | `cpa logs errors` / `cpa logs download <name>` | List/download saved error log files. |
@@ -74,6 +93,50 @@ cpa logs trace <request-id>     # full per-request blob
 | `cpa doctor` | Diagnose WSL/network issues that block OAuth auto-callback. |
 
 Most `ls`-style commands and `cpa usage` accept `--json` for piping into `jq`.
+
+## Multi-account load balancing
+
+The backend's selector picks the highest `auth.priority` value first; lower
+priorities are only used when every higher-priority auth in that provider is
+cooling down. `cpa lb` exposes a 3-state convention on top of this:
+
+| State | Mechanism | Meaning |
+|---|---|---|
+| `ACTIVE` | `priority = 10` (or any value tied for the highest in that provider) | Routed first. |
+| `STANDBY` | `priority = 0` (default — backend deletes the field when 0 is sent) | Used only when every ACTIVE peer is exhausted. |
+| `DISABLED` | `disabled = true` | Excluded entirely; priority preserved. |
+
+Within a provider, accounts that share the highest priority all render as
+ACTIVE. If you have one peer to demote but every account currently shares the
+default priority, `cpa lb set <name> standby` warns that the change is a no-op
+until at least one peer is promoted to ACTIVE.
+
+## Per-provider endpoints
+
+The backend exposes provider-specific local routes that are locked to one auth
+pool by handler type:
+
+| Provider | Endpoint | Notes |
+|---|---|---|
+| `codex` | `/backend-api/codex/responses` (or `/v1/responses`) | OpenAI Responses protocol — Codex auths only. |
+| `anthropic` | `/v1/messages` | Anthropic Messages protocol — Claude auths only. |
+| `gemini` | `/v1beta/models/<MODEL>:<METHOD>` | Gemini API — Gemini auths only. |
+| `gemini-cli` | `/v1internal:<METHOD>` | Gemini CLI internal — gemini-cli auths only. |
+| (mixed) | `/v1/chat/completions` | OpenAI Chat — dispatched by model name across whichever pool covers the requested model. |
+
+Run `cpa endpoint ls` to see this table prefixed with your local base URL plus
+a "has auth" indicator. Run `cpa endpoint url <provider> --client-config` to
+print env-var snippets ready to paste into client tooling.
+
+**Limitation**: proxy api-keys (`cpa apikeys`) are **not** scoped per provider
+on the backend; the same key works against every endpoint above. If you need
+hard separation (separate keys, separate auth-files dir, separate process per
+provider), `cpa endpoint plan` prints the multi-instance recipe.
+
+**Model whitelist**: each provider's auth file embeds an upstream model
+allowlist; the backend rejects requests for models outside that list. If you
+need a non-default model, register it via `cpa providers add-model <provider>
+<index> <model>` first.
 
 ## How OAuth works in this CLI
 
