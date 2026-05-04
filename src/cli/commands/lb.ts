@@ -4,58 +4,17 @@ import { authFilesApi } from '@/services/api/authFiles';
 import { configApi } from '@/services/api/config';
 import type { AuthFileItem } from '@/types/authFile';
 import { formatUnixTimestamp } from '@/utils/format';
+import {
+  PRIORITY_ACTIVE,
+  PRIORITY_STANDBY,
+  authPriority,
+  classifyStates,
+  inferProvider,
+  type LbState,
+} from '@/utils/lbState';
 import { makeTable } from '../ui/tables';
 
-const PRIORITY_ACTIVE = 10;
-const PRIORITY_STANDBY = 0;
 const VALID_STRATEGIES = new Set(['round-robin', 'fill-first']);
-type LbState = 'active' | 'standby' | 'disabled';
-
-function authPriority(file: AuthFileItem): number {
-  const raw = file.priority;
-  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
-  return 0;
-}
-
-function inferProvider(file: AuthFileItem): string {
-  const provider = String(file.provider ?? '').trim();
-  if (provider) return provider;
-  const type = String(file.type ?? '').trim();
-  if (type) return type;
-  return 'unknown';
-}
-
-/**
- * Returns ACTIVE/STANDBY/DISABLED for each file. Within a provider, the
- * highest non-disabled priority bucket is ACTIVE; lower buckets are STANDBY.
- * If every account in a provider shares the same priority, all are ACTIVE.
- */
-function classifyStates(files: AuthFileItem[]): Map<string, LbState> {
-  const result = new Map<string, LbState>();
-  const maxByProvider = new Map<string, number>();
-
-  for (const file of files) {
-    if (file.disabled === true) continue;
-    const provider = inferProvider(file);
-    const priority = authPriority(file);
-    const current = maxByProvider.get(provider);
-    if (current === undefined || priority > current) {
-      maxByProvider.set(provider, priority);
-    }
-  }
-
-  for (const file of files) {
-    if (file.disabled === true) {
-      result.set(file.name, 'disabled');
-      continue;
-    }
-    const provider = inferProvider(file);
-    const max = maxByProvider.get(provider) ?? 0;
-    result.set(file.name, authPriority(file) === max ? 'active' : 'standby');
-  }
-
-  return result;
-}
 
 function badgeForState(state: LbState): string {
   switch (state) {

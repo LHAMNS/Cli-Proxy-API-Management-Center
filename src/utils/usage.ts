@@ -1591,6 +1591,74 @@ export function computeKeyStatsFromDetails(usageDetails: UsageDetail[]): KeyStat
   return { bySource, byAuthIndex };
 }
 
+export interface MonthlyTokenTotals {
+  windowLabel: string;
+  requests: number;
+  failed: number;
+  tokens: {
+    input: number;
+    cached: number;
+    output: number;
+    reasoning: number;
+    total: number;
+  };
+}
+
+/**
+ * Sum tokens + request counts for the calendar month containing `refDate`
+ * (defaults to now). Uses local-time month boundaries to match the user's
+ * mental model of "this month".
+ */
+export function aggregateMonthlyTokens(
+  details: UsageDetail[],
+  refDate: Date = new Date()
+): MonthlyTokenTotals {
+  const monthStart = new Date(refDate.getFullYear(), refDate.getMonth(), 1).getTime();
+  const monthEnd = new Date(refDate.getFullYear(), refDate.getMonth() + 1, 1).getTime();
+  const yearStr = String(refDate.getFullYear());
+  const monthStr = String(refDate.getMonth() + 1).padStart(2, '0');
+
+  const totals: MonthlyTokenTotals = {
+    windowLabel: `${yearStr}-${monthStr}`,
+    requests: 0,
+    failed: 0,
+    tokens: { input: 0, cached: 0, output: 0, reasoning: 0, total: 0 },
+  };
+
+  for (const detail of details) {
+    const ts =
+      typeof detail.__timestampMs === 'number' && detail.__timestampMs > 0
+        ? detail.__timestampMs
+        : parseTimestampMs(detail.timestamp);
+    if (!Number.isFinite(ts) || ts < monthStart || ts >= monthEnd) continue;
+
+    totals.requests += 1;
+    if (detail.failed) totals.failed += 1;
+
+    const tokens = detail.tokens ?? ({} as UsageDetail['tokens']);
+    const input = typeof tokens.input_tokens === 'number' ? Math.max(tokens.input_tokens, 0) : 0;
+    const output = typeof tokens.output_tokens === 'number' ? Math.max(tokens.output_tokens, 0) : 0;
+    const reasoning =
+      typeof tokens.reasoning_tokens === 'number' ? Math.max(tokens.reasoning_tokens, 0) : 0;
+    const cached = Math.max(
+      typeof tokens.cached_tokens === 'number' ? Math.max(tokens.cached_tokens, 0) : 0,
+      typeof tokens.cache_tokens === 'number' ? Math.max(tokens.cache_tokens, 0) : 0
+    );
+    const explicitTotal =
+      typeof tokens.total_tokens === 'number' && tokens.total_tokens > 0
+        ? tokens.total_tokens
+        : input + output + reasoning + cached;
+
+    totals.tokens.input += input;
+    totals.tokens.cached += cached;
+    totals.tokens.output += output;
+    totals.tokens.reasoning += reasoning;
+    totals.tokens.total += explicitTotal;
+  }
+
+  return totals;
+}
+
 export type TokenCategory = 'input' | 'output' | 'cached' | 'reasoning';
 
 export interface TokenBreakdownSeries {

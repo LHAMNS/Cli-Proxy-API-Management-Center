@@ -13,6 +13,7 @@ import { registerProvidersCommand } from './commands/providers';
 import { registerApiKeysCommand } from './commands/apikeys';
 import { registerDoctorCommand } from './commands/doctor';
 import { registerLbCommand } from './commands/lb';
+import { registerStatusCommand } from './commands/status';
 
 const program = new Command();
 
@@ -46,6 +47,7 @@ registerProvidersCommand(program);
 registerApiKeysCommand(program);
 registerDoctorCommand(program);
 registerLbCommand(program);
+registerStatusCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const error = err as Error & { code?: string };
