@@ -35,6 +35,16 @@ export interface AuthFileItem {
   recent_requests?: number;
   success?: number;
   failed?: number;
+  email?: string;
+  account?: string;
+  account_type?: string;
+  auth_index?: string | number | null;
+  id_token?: {
+    chatgpt_account_id?: string;
+    plan_type?: string;
+    chatgpt_subscription_active_start?: string | number;
+    chatgpt_subscription_active_until?: string | number;
+  };
   [key: string]: unknown;
 }
 

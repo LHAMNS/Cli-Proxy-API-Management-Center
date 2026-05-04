@@ -9,6 +9,7 @@ import {
 import { calculateLatencyStatsFromDetails, formatDurationMs } from '@/utils/latency';
 import { formatNumber } from '@/utils/format';
 import { makeTable } from '../ui/tables';
+import { registerUsageAccountSubcommand } from './usageAccount';
 
 const TIME_RANGES: Record<string, number> = {
   '1h': 60 * 60 * 1000,
@@ -190,7 +191,7 @@ function buildJsonReport(filtered: UsageDetail[]): Record<string, unknown> {
 }
 
 export function registerUsageCommand(program: Command): void {
-  program
+  const usage = program
     .command('usage')
     .description('Show token usage statistics aggregated by model and by key/auth.')
     .option('-l, --last <window>', 'Time window: 1h, 6h, 24h, 7d, all (default: 24h)', '24h')
@@ -213,4 +214,6 @@ export function registerUsageCommand(program: Command): void {
       renderModelTable(bucketByModel(filtered));
       renderKeyStatsTable(filtered);
     });
+
+  registerUsageAccountSubcommand(usage);
 }
