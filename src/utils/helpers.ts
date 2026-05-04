@@ -46,15 +46,6 @@ export function throttle<This, Args extends unknown[], Return>(
 }
 
 /**
- * HTML 转义（防 XSS）
- */
-export function escapeHtml(text: string): string {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-/**
  * 生成唯一 ID
  */
 export function generateId(): string {

@@ -18,14 +18,8 @@ export const computeApiUrl = (base: string): string => {
 };
 
 export const detectApiBaseFromLocation = (): string => {
-  try {
-    const { protocol, hostname, port } = window.location;
-    const normalizedPort = port ? `:${port}` : '';
-    return normalizeApiBase(`${protocol}//${hostname}${normalizedPort}`);
-  } catch (error) {
-    console.warn('Failed to detect api base from location, fallback to default', error);
-    return normalizeApiBase(`http://localhost:${DEFAULT_API_PORT}`);
-  }
+  // CLI mode: there is no `window`. Always fall back to the default localhost URL.
+  return normalizeApiBase(`http://localhost:${DEFAULT_API_PORT}`);
 };
 
 export const isLocalhost = (hostname: string): boolean => {
