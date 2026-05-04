@@ -14,6 +14,7 @@ import { registerApiKeysCommand } from './commands/apikeys';
 import { registerDoctorCommand } from './commands/doctor';
 import { registerLbCommand } from './commands/lb';
 import { registerStatusCommand } from './commands/status';
+import { registerEndpointCommand } from './commands/endpoint';
 
 const program = new Command();
 
@@ -22,8 +23,9 @@ program
   .description('Local-only CLI for managing the CLIProxyAPI backend.')
   .version('0.1.0');
 
-// Subcommands that don't need a configured key (they bootstrap differently).
-const NO_KEY_REQUIRED = new Set(['connect', 'version', 'help', 'doctor']);
+// Subcommand leaf names that don't need a configured management key
+// (they print local information only, never reach the backend).
+const NO_KEY_REQUIRED = new Set(['connect', 'version', 'help', 'doctor', 'plan', 'url']);
 
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
@@ -48,6 +50,7 @@ registerApiKeysCommand(program);
 registerDoctorCommand(program);
 registerLbCommand(program);
 registerStatusCommand(program);
+registerEndpointCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const error = err as Error & { code?: string };
